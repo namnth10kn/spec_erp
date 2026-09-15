@@ -17,17 +17,20 @@
 > Lý do tách: WFH **không** dùng chung mô hình dữ liệu với đơn xin nghỉ phép. Nó là
 > bản đăng ký **theo tuần** gồm một tập ngày rời rạc (tối đa 2 ngày, không được chọn
 > ngày lễ và ngày bắt buộc lên văn phòng), chỉ đăng ký cho tuần kế tiếp, sửa được tới
-> 23:59 chủ nhật, mặc định **tự duyệt** khi khoá tuần, và chỉ có **3 trạng thái**
-> (`awaiting_approval` / `approved` / `rejected`). Ép chung vào `RequestRes` sẽ khiến
-> gần hết các trường phải nullable.
+> 23:59 chủ nhật, **không qua bước duyệt**. Ép chung vào `RequestRes` sẽ khiến gần hết
+> các trường phải nullable.
 >
-> **File này áp dụng cho đơn xin nghỉ phép.** Những gì WFH dùng chung: permission
-> module (§4), cách sinh số đơn (§6.1), org-chart, action log, thông báo in-app (§8.4),
-> và điều hướng sidebar (§10.2, §11.1).
+> **Ngoại lệ:** sau khi tuần đã khoá, nhân viên tạo **đơn xin WFH sau hạn**
+> (`type = 'late_wfh'`). Đơn đó chạy trên `RequestRes` của file này, người duyệt là
+> **HR** (không phải quản lý trực tiếp). Chi tiết ở spec WFH §3.5.
+>
+> **File này áp dụng cho đơn xin nghỉ phép + đơn sau hạn (`late_wfh`).** Những gì
+> đăng ký tuần dùng chung: permission module (§4), cách sinh số đơn (§6.1), org-chart,
+> action log, thông báo in-app (§8.4), và điều hướng sidebar (§10.2, §11.1).
 
 **Thay đổi ở v4**
 
-- **Tách WFH ra file spec riêng** — xem khung trên. File này từ đây chỉ đặc tả đơn xin nghỉ phép + phần dùng chung.
+- **Tách WFH ra file spec riêng** — xem khung trên. File này từ đây đặc tả đơn xin nghỉ phép + phần dùng chung + type `late_wfh` (đơn xin WFH sau hạn, duyệt bởi HR).
 
 **Thay đổi ở v3**
 
@@ -89,7 +92,7 @@ Hiện tại nhân viên gửi các đơn cá nhân (xin nghỉ, xin làm việc
 ### 3.1 Trong phạm vi (v1)
 
 - Tạo / sửa / xoá (soft delete) / gửi duyệt đơn.
-- Một loại đơn: **Xin nghỉ phép (Leave of Absence)**. WFH nằm ở [`requests-wfh-spec.md`](./requests-wfh-spec.md).
+- Hai loại đơn trên `RequestRes`: **Xin nghỉ phép (Leave of Absence)** và **Xin WFH sau hạn (`late_wfh`)**. Đăng ký WFH theo tuần nằm ở [`requests-wfh-spec.md`](./requests-wfh-spec.md).
 - Sinh tự động `Proposal Number`.
 - Luồng duyệt 1 cấp: Proposer → Approver (Duyệt / Từ chối / Yêu cầu chỉnh sửa).
 - **Gửi thông báo vào Google Chat** (space nội bộ) dưới dạng card, @mention người duyệt và người theo dõi; mọi cập nhật trạng thái reply vào cùng thread.
@@ -104,7 +107,7 @@ Hiện tại nhân viên gửi các đơn cá nhân (xin nghỉ, xin làm việc
 - Tính & trừ quỹ phép năm tự động (chỉ **hiển thị** số dư nếu BE cung cấp, không tính toán ở FE).
 - Duyệt nhiều cấp / uỷ quyền duyệt khi approver vắng mặt.
 - Đồng bộ với máy chấm công, Google Calendar.
-- Loại đơn khác ngoài đơn xin nghỉ phép (OT, công tác, tạm ứng…).
+- Loại đơn khác ngoài nghỉ phép và WFH sau hạn (OT, công tác, tạm ứng…).
 - **Duyệt ngay trong Google Chat** (bấm nút Duyệt/Từ chối trên card). v1 card chỉ có nút `Xem chi tiết` mở về ERP; duyệt vẫn làm trong ERP.
 - Gửi DM riêng cho người duyệt (v1 chỉ đẩy vào space chung).
 - Gửi email — **đã bỏ hoàn toàn**, không còn trong mọi phiên bản.
@@ -140,10 +143,11 @@ Thêm `requests: 'requests'` vào `Modules` trong `lib/constants/role-permission
 ```ts
 // lib/constants/requests.ts
 /**
- * WFH KHÔNG nằm trong enum này — nó có entity riêng (requests-wfh-spec.md).
+ * Đăng ký WFH theo tuần KHÔNG nằm trong enum này — entity riêng (requests-wfh-spec.md).
+ * `late_wfh` là đơn xin WFH *sau hạn*, chạy trên RequestRes, duyệt bởi HR.
  * Giữ mảng để kiến trúc còn chỗ cho loại đơn mới (OT, công tác…).
  */
-export const REQUEST_TYPES = ['leave_of_absence'] as const;
+export const REQUEST_TYPES = ['leave_of_absence', 'late_wfh'] as const;
 export type RequestType = (typeof REQUEST_TYPES)[number];
 
 /** Chi tiết loại nghỉ — chỉ áp dụng khi type = 'leave_of_absence'. */
@@ -183,8 +187,12 @@ export interface RequestRes extends ListFileRecords {
   proposal_number: string;          // "02/0926/NGUYENTHEHOAINAM"
   proposal_date: string;            // ISO date — ngày lập đơn
   type: RequestType;
-  leave_category?: LeaveCategory | null;   // bắt buộc khi type = leave_of_absence
+  leave_category?: LeaveCategory | null;   // bắt buộc khi type = leave_of_absence; null với late_wfh
   status: RequestStatus;
+  /** Chỉ có khi type = 'late_wfh' — thứ 2 của tuần đang xin. */
+  wfh_week_start?: string | null;
+  /** Chỉ có khi type = 'late_wfh' — các ngày WFH rời rạc. */
+  wfh_dates?: string[] | null;
 
   // Người liên quan
   proposer_id: number;              // luôn = user đang đăng nhập lúc tạo
@@ -286,6 +294,8 @@ export interface CreateRequestPayload {
   file_ids?: number[];
   /** true → tạo và gửi duyệt luôn; false → lưu nháp. */
   submit?: boolean;
+  /** Bắt buộc khi type = 'late_wfh'. FE không gửi week_start — BE gắn tuần đang khoá. */
+  wfh_dates?: string[];
 }
 
 export type UpdateRequestPayload = Partial<CreateRequestPayload>;
@@ -341,7 +351,7 @@ Format: **`{SEQ}/{MMYY}/{FULLNAME_UPPER}`** — ví dụ `02/0926/NGUYENTHEHOAIN
 | Trường | Rule |
 |---|---|
 | `type` | Bắt buộc, ∈ `REQUEST_TYPES`. |
-| `leave_category` | Bắt buộc. |
+| `leave_category` | Bắt buộc khi `type = leave_of_absence`. Cấm gửi khi `type = late_wfh`. |
 | `reason` | Bắt buộc, 5–500 ký tự, trim. |
 | `proposal_date` | Bắt buộc, không được ở tương lai quá 7 ngày. |
 | `start_date` | Bắt buộc. Cảnh báo (không chặn) nếu ở quá khứ → nhắc người dùng bổ sung lý do nộp muộn vào `reason`. |
@@ -349,6 +359,7 @@ Format: **`{SEQ}/{MMYY}/{FULLNAME_UPPER}`** — ví dụ `02/0926/NGUYENTHEHOAIN
 | `replacement_plan` | Optional, ≤ 500 ký tự. Hiển thị `Không có` trong card Chat nếu rỗng. |
 | `approver_id` | FE không validate — BE resolve và đảm bảo `!== proposer_id` (§7.3). |
 | `file_ids` | ≤ 5 file, mỗi file ≤ 10MB. **Bắt buộc ≥ 1 file** khi `leave_category = sick_leave` và `total_days >= 3`. |
+| `wfh_dates` | Bắt buộc khi `type = late_wfh`. Quy tắc ngày: spec WFH §3.5. `start_date`/`end_date` do BE suy ra từ min/max của mảng này. |
 
 **Cảnh báo mềm (soft warning, không block submit):**
 
@@ -364,7 +375,7 @@ Bốn trường dưới đây **không phải ô nhập tự do**. FE lấy về
 | Trường | Nguồn | Người dùng sửa được? |
 |---|---|---|
 | Người làm đơn | User đang đăng nhập (`useAuth()`) | **Không.** Hiển thị read-only, nền `muted`. |
-| Người duyệt | Quản lý cấp trên trực tiếp theo org-chart (§7.3) | **Không** với nhân viên thường. Hiển thị read-only kèm chức danh. Chỉ HR/CEO thấy nút `Đổi người duyệt`. |
+| Người duyệt | Quản lý cấp trên trực tiếp theo org-chart (§7.3). Với `late_wfh`: **HR**. | **Không** với nhân viên thường. Hiển thị read-only kèm chức danh. Chỉ HR/CEO thấy nút `Đổi người duyệt`. |
 | Liên hệ khi nghỉ | `EmployeeRes.phone` của người làm đơn (`lib/types/employee.ts`) | **Có**, nhưng mặc định là ô read-only kèm link `Dùng số khác` để mở ra sửa. Sửa ở đây **không** ghi ngược vào hồ sơ nhân viên. |
 | Người theo dõi | Nhóm HR mặc định (§7.3 bước 5) | **Có** — multi-select, thêm/bớt được **nhiều người**. |
 
@@ -417,13 +428,17 @@ Bốn trường dưới đây **không phải ô nhập tự do**. FE lấy về
 
 ### 7.3 Xác định người duyệt
 
-**Người duyệt luôn là quản lý cấp trên trực tiếp của người làm đơn.** Đây là quy tắc hệ thống, không phải lựa chọn của người dùng — form không có combobox chọn người duyệt.
+**Người duyệt luôn do hệ thống gán, không phải lựa chọn của người dùng** — form không có combobox chọn người duyệt (trừ nút đổi của HR/CEO).
+
+**Đơn xin nghỉ phép (`leave_of_absence`):** người duyệt là **quản lý cấp trên trực tiếp**.
 
 1. BE lấy quản lý trực tiếp của proposer từ **org-chart** (`org-chart-service`) và gán vào `approver_id`.
 2. Nếu không có (proposer là CEO hoặc org-chart thiếu dữ liệu) → fallback sang người có `position_code = 'ceo'`.
 3. Nếu người resolve được lại chính là proposer → nhảy lên một cấp nữa (không ai tự duyệt đơn của mình).
 4. Nếu cả 3 bước trên đều không ra người hợp lệ → BE trả `REQUEST_NO_APPROVER`; FE chặn `Gửi duyệt` và hiện thông báo *"Chưa xác định được quản lý trực tiếp của bạn. Liên hệ HR để cập nhật sơ đồ tổ chức."*
 5. FE **chỉ hiển thị** kết quả (read-only, kèm avatar + chức danh). Riêng HR/CEO có nút `Đổi người duyệt` mở combobox — dùng cho trường hợp quản lý trực tiếp nghỉ dài hạn.
+
+**Đơn xin WFH sau hạn (`late_wfh`):** người duyệt là **HR** (`position_code = 'bo_division'` + `job_role = 'hr'`), không lấy quản lý trực tiếp. Nếu proposer chính là HR → fallback CEO. Chi tiết form và quy tắc ngày ở [`requests-wfh-spec.md`](./requests-wfh-spec.md) §3.5, §6.4.
 
 **Người theo dõi (nhiều người):** mặc định là **tất cả** nhân viên `position_code = 'bo_division'` + `job_role = 'hr'` (hiện tại là Trần Thị Ngọc Hà). Người làm đơn thêm/bớt thoải mái — multi-select, không giới hạn cứng số lượng (khuyến nghị cảnh báo mềm khi > 10 người vì mỗi người là một @mention trong Google Chat). Người theo dõi **không có quyền duyệt**; họ chỉ được nhắc tên trong thông báo.
 
@@ -594,14 +609,18 @@ app/[locale]/(protected)/requests/
 │   └── [id]/
 │       ├── page.tsx              # Chi tiết
 │       └── edit/page.tsx         # Sửa (draft | changes_requested)
-└── wfh/                          # ĐĂNG KÝ WFH — xem requests-wfh-spec.md §11
+└── wfh/                          # ĐĂNG KÝ WFH — xem requests-wfh-spec.md §9
     ├── page.tsx                  # 2 tab: Của tôi | Toàn công ty
-    └── [id]/page.tsx             # Chi tiết + lịch sử thay đổi
+    ├── [id]/page.tsx             # Chi tiết bản đăng ký tuần + lịch sử thay đổi
+    └── late/
+        ├── create/page.tsx       # Đơn xin WFH sau hạn
+        └── [id]/page.tsx         # Chi tiết / duyệt đơn sau hạn (RequestRes)
 ```
 
-> Nhánh `wfh/` **không có** `create/` và `[id]/edit/`: đăng ký WFH là upsert theo
-> tuần, làm ngay trên màn danh sách qua khối "Đăng ký WFH tuần sau", không có trang
-> tạo riêng. Chi tiết ở [`requests-wfh-spec.md`](./requests-wfh-spec.md).
+> Nhánh `wfh/` **không có** `[id]/edit/` cho bản đăng ký tuần: upsert ngay trên màn
+> danh sách: tick checkbox trên lưới tuần. Đơn sau hạn (`late_wfh`) có
+> `late/create/` và `late/[id]/`, tái dùng component chi tiết đơn nghỉ. Chi tiết ở
+> [`requests-wfh-spec.md`](./requests-wfh-spec.md).
 
 > **Không có route `/requests` trần.** Truy cập thẳng `/requests` thì redirect sang
 > `/requests/leave`. Hai nhánh dùng chung toàn bộ component bên dưới; khác nhau ở
@@ -675,13 +694,13 @@ Menu **Đơn từ** trên sidebar là menu cha bung ra đúng **2 mục con**, m
 | Mục con | Route | Lọc cứng |
 |---|---|---|
 | **Đơn xin nghỉ phép** | `/requests/leave` | `type = leave_of_absence` |
-| **Đăng ký WFH** | `/requests/wfh` | Entity riêng — xem [`requests-wfh-spec.md`](./requests-wfh-spec.md) |
+| **Đăng ký WFH** | `/requests/wfh` | Entity riêng + đơn sau hạn `late_wfh` — xem [`requests-wfh-spec.md`](./requests-wfh-spec.md) |
 
-Hai màn **không dùng chung entity**: màn nghỉ phép chạy trên `RequestRes` (§5.2), màn WFH chạy trên `WfhRegistrationRes` của spec riêng. Vì vậy không màn nào có cột hay bộ lọc "Loại đơn"; màn nghỉ phép có "Loại nghỉ", màn WFH lọc theo tuần và nhân viên.
+Hai màn **không dùng chung entity cho luồng chính**: màn nghỉ phép chạy trên `RequestRes` `type = leave_of_absence` (§5.2), màn WFH chạy trên `WfhRegistrationRes` của spec riêng. Đơn xin WFH sau hạn là `RequestRes` `type = late_wfh` nhưng **sống trên màn WFH**, không lẫn vào danh sách nghỉ phép. Vì vậy không màn nào có cột hay bộ lọc "Loại đơn"; màn nghỉ phép có "Loại nghỉ", màn WFH lọc theo tuần và nhân viên.
 
 **Phần dùng chung cho cả 2 màn:**
 
-- **Header:** tiêu đề màn + nút primary (`Tạo đơn` ở màn nghỉ phép; màn WFH dùng khối đăng ký tuần thay cho nút, xem spec WFH).
+- **Header:** tiêu đề màn + nút primary (`Tạo đơn` ở màn nghỉ phép; màn WFH không có nút tạo — tick checkbox trên lưới, xem spec WFH).
 - **Tabs (màn nghỉ phép):** `Của tôi` (mặc định) · `Chờ tôi duyệt` (kèm badge số) · `Tất cả` (chỉ hiện với CEO/HR). Màn WFH có bộ tab riêng: `Của tôi` · `Toàn công ty`.
 - **Toolbar:** ô tìm kiếm (debounce 400ms, tái dùng `use-debounce`), filter Trạng thái + Khoảng thời gian, nút Export.
 - **Row action menu:** Xem chi tiết · Sửa · Gửi duyệt · Nhân bản · Huỷ · Xoá — ẩn/hiện theo §7.1 và permission.
@@ -692,21 +711,21 @@ Hai màn **không dùng chung entity**: màn nghỉ phép chạy trên `RequestR
 | | Đơn xin nghỉ phép | Đăng ký WFH |
 |---|---|---|
 | Đặc tả | **File này** | [`requests-wfh-spec.md`](./requests-wfh-spec.md) |
-| Tabs | `Của tôi` · `Chờ tôi duyệt` · `Tất cả` | `Của tôi` · `Toàn công ty` (BO/DD/CEO) |
-| Thẻ số liệu | Phép năm còn lại · Đã dùng năm nay · Đang chờ duyệt · Đã duyệt năm nay | Đã đăng ký · Tổng lượt WFH · Chờ duyệt · Từ chối (theo tuần đang lọc) |
-| Bộ lọc riêng | `Loại nghỉ` (5 giá trị ở §5.1) | `Tuần` · `Nhân viên` · `Phòng ban` |
-| Cột bảng | `Số đơn` · `Loại nghỉ` · `Người làm đơn`¹ · `Thời gian` · `Thời lượng` · `Lý do` · `Người duyệt` · `Trạng thái` · ⋯ | `Nhân viên` · `Phòng ban` · `Tuần` · `Ngày WFH` · `Số ngày` · `Trạng thái` · `Ghi chú` · ⋯ |
-| Trạng thái | 6 (§7.2) | 3 |
+| Tabs | `Của tôi` · `Chờ tôi duyệt` · `Tất cả` | `Của tôi` · `Toàn công ty` (HR/CEO) |
+| Thẻ số liệu | Phép năm còn lại · Đã dùng năm nay · Đang chờ duyệt · Đã duyệt năm nay | Đã đăng ký · Tổng lượt WFH · Đơn sau hạn chờ duyệt (theo tuần đang lọc) |
+| Bộ lọc riêng | `Loại nghỉ` (5 giá trị ở §5.1) | `Tuần` (bắt buộc) · tìm tên · `Nhân viên` · `Phòng ban` |
+| Cột bảng | `Số đơn` · `Loại nghỉ` · `Người làm đơn`¹ · `Thời gian` · `Thời lượng` · `Lý do` · `Người duyệt` · `Trạng thái` · ⋯ | Lưới tuần: `No` · `Fullname` · `Role` · `Mon`–`Sun`. Ô ngày = **checkbox** WFH. Mặc định: tuần hiện tại + nhân viên đang đăng nhập |
+| Trạng thái | 6 (§7.2) | Đăng ký tuần: không có. Đơn sau hạn: 6 (§7.2) |
 
 ¹ Cột `Người làm đơn` chỉ hiện ở tab `Chờ tôi duyệt` và `Tất cả`.
 
-**Badge trên sidebar:** mục `Đơn xin nghỉ phép` mang badge số đơn đang chờ user duyệt. Mục `Đăng ký WFH` mang badge số đăng ký đang chờ rà soát (chỉ hiện với BO/DD/CEO). Menu cha `Đơn từ` không mang badge riêng để tránh trùng lặp con số.
+**Badge trên sidebar:** mục `Đơn xin nghỉ phép` mang badge số đơn đang chờ user duyệt. Mục `Đăng ký WFH` mang badge số đơn sau hạn đang chờ HR duyệt (chỉ hiện với HR/CEO). Menu cha `Đơn từ` không mang badge riêng để tránh trùng lặp con số.
 
 ### 11.2 Form tạo/sửa
 
 Form 1 trang, chia section; cột phải là preview thông báo Google Chat, dính (sticky) trên màn hình ≥ lg.
 
-> **Không còn bước chọn loại đơn.** Form này chỉ dùng cho `/requests/leave/create` — tiêu đề card là `Tạo đơn xin nghỉ phép`. WFH không có trang tạo riêng (xem [`requests-wfh-spec.md`](./requests-wfh-spec.md) §8.1).
+> **Không còn bước chọn loại đơn.** Form nghỉ phép chỉ dùng cho `/requests/leave/create` — tiêu đề card là `Tạo đơn xin nghỉ phép`. Đăng ký WFH tuần làm trên màn danh sách; đơn xin WFH sau hạn có form riêng `/requests/wfh/late/create` (xem [`requests-wfh-spec.md`](./requests-wfh-spec.md) §6.1, §6.4).
 
 1. **Thông tin đơn** — `Số đơn` (read-only, tooltip giải thích format), `Ngày làm đơn` (date picker, mặc định hôm nay), `Người làm đơn` (read-only, user hiện tại), và — **chỉ ở đơn xin nghỉ** — select `Loại nghỉ` (bắt buộc).
 2. **Thời gian** — radio `Cả ngày / Nửa ngày / Theo giờ`; field bên dưới đổi theo lựa chọn; hiển thị dòng tóm tắt realtime: *"Tổng: 2 giờ (15h30 – 17h30, ngày 11/09/2026)"*.
@@ -724,6 +743,7 @@ Form 1 trang, chia section; cột phải là preview thông báo Google Chat, d�
 - Cột phải: trạng thái + action bar + timeline action log (ai, làm gì, lúc nào, note).
 - Với approver: action bar dính đáy màn hình trên mobile.
 - `Reject` / `Request changes` mở dialog bắt buộc nhập lý do (≥ 5 ký tự).
+- Chi tiết đơn xin WFH sau hạn ở `/requests/wfh/late/[id]` — cùng layout, khối thời lượng nghỉ đổi thành chip ngày WFH.
 
 ---
 
@@ -904,7 +924,7 @@ Namespace `requests`:
 **Về nghiệp vụ**
 
 6. **Quỹ phép năm** — BE đã có dữ liệu số ngày phép chưa, hay v1 chỉ hiển thị khi API sẵn sàng?
-7. **Ngày lễ** — có bảng ngày nghỉ lễ trong hệ thống để tính `total_days` không?
+7. **Ngày lễ** — **Đã chốt:** HR CRUD trên màn **Cấu hình chung**. Chi tiết [`general-setting.md`](./general-setting.md) §5. Đơn nghỉ loại khỏi `total_days`; WFH dùng cho R4.
 8. **Duyệt nhiều cấp** — đơn nghỉ dài ngày có cần thêm cấp duyệt (CEO) không?
 9. **Hạn nộp trước** — có quy định nội bộ (ví dụ nghỉ phép phải xin trước 3 ngày) để đưa thành cảnh báo/chặn không?
 10. **Mobile** — `app/[locale]/globals.css` đang đặt `body { min-width: 1280px }` nên ERP hiện là desktop-only; tiêu chí nghiệm thu responsive đã bỏ khỏi §14. Nếu muốn dùng trên điện thoại thì phải gỡ `min-width` trước.
