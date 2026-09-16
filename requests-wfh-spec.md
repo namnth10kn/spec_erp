@@ -4,9 +4,19 @@
 |---|---|
 | **Thuộc module** | `requests` — mục con **Đơn từ ▸ Đăng ký WFH** |
 | **Route** | `/requests/wfh` |
-| **Trạng thái tài liệu** | Draft v2 |
+| **Trạng thái tài liệu** | Draft v4 |
 | **Ngày tạo** | 2026-09-15 |
-| **Spec anh em** | [`requests-module-spec.md`](./requests-module-spec.md) — đơn xin nghỉ phép + phần dùng chung<br>[`general-setting.md`](./general-setting.md) — Cấu hình chung (ngày bắt buộc, hạn khoá, max ngày WFH, ngày lễ) |
+| **Cập nhật** | 2026-09-16 — đơn **WFH dài hạn** (`long_term_wfh`) duyệt **2 bước**: quản lý trực tiếp → HR |
+| **Spec anh em** | [`requests-module-spec.md`](./requests-module-spec.md) — đơn xin nghỉ phép + phần dùng chung + `late_wfh` + `long_term_wfh`<br>[`general-setting.md`](./general-setting.md) — Cấu hình chung (ngày bắt buộc, hạn khoá, max ngày WFH, ngày lễ) |
+
+**Thay đổi ở v4**
+
+- **Đơn WFH dài hạn duyệt 2 bước tuần tự** — **quản lý trực tiếp** duyệt trước, **HR** duyệt sau cùng. Thêm trạng thái `pending_hr` ("Chờ HR duyệt") giữa `pending` và `approved`. Đơn chỉ có hiệu lực (materialize lên lưới tuần) **sau khi HR duyệt**. Bất kỳ bước nào từ chối / yêu cầu chỉnh sửa đều dừng luồng. §3.7, §3.8, §6.5.
+- **HR duyệt theo nhóm** — mọi nhân viên `position_code = 'bo_division'` + `job_role = 'hr'` đều thấy đơn ở bước 2 và ai thao tác trước thì người đó là người duyệt (giống `late_wfh`). BE ghi lại `hr_approver_id`.
+
+**Thay đổi ở v3**
+
+- **Đơn đăng ký WFH dài hạn** (`type = 'long_term_wfh'`) — xin WFH liên tục theo khoảng *từ ngày → đến ngày*. Form: người làm đơn, từ ngày, đến ngày, lý do, tài liệu (upload). Chạy trên `RequestRes` + state machine của spec chính. §3.7, §6.5.
 
 
 ## 2. Thuật ngữ
@@ -19,6 +29,9 @@
 | **Khoá tuần (lock)** | Thời điểm hết hạn sửa. Nhân viên không sửa / huỷ bản đăng ký được nữa. **Chỉ HR** còn quyền chỉnh (§3.6). Nhân viên muốn WFH tiếp thì tạo đơn sau hạn (§3.5). |
 | **Ngày bắt buộc lên văn phòng** | Ngày trong tuần không được đăng ký WFH. Mặc định **thứ 5**, nhưng **cấu hình được** (§3.2). |
 | **Đơn xin WFH sau hạn (late request)** | Đơn `type = 'late_wfh'` tạo **sau khi tuần đã khoá**, người duyệt là HR. Dùng state machine của spec chính (§7). |
+| **Đơn WFH dài hạn (long-term request)** | Đơn `type = 'long_term_wfh'` xin WFH **liên tục** theo khoảng từ ngày → đến ngày (không phải tick từng ngày trên lưới tuần). Có lý do + tài liệu đính kèm. Duyệt **2 bước**: quản lý trực tiếp → HR. Dùng state machine của spec chính (§7). |
+| **Duyệt 2 bước (two-step approval)** | Riêng đơn WFH dài hạn. **Bước 1** — quản lý trực tiếp xác nhận nhu cầu công việc (`pending` → `pending_hr`). **Bước 2** — HR chốt theo chính sách (`pending_hr` → `approved`). Hai bước **tuần tự**, không song song: HR chỉ thấy đơn sau khi quản lý đã duyệt. |
+| **Người duyệt bước 1 / bước 2** | Bước 1 là **một người cụ thể** (`approver_id`, quản lý trực tiếp resolve từ org-chart). Bước 2 là **cả nhóm HR** — không gán đích danh trước, ai thao tác trước thì BE ghi người đó vào `hr_approver_id`. |
 
 ---
 
@@ -26,7 +39,7 @@
 
 ### 3.1 Số đơn
 
-Dùng lại nguyên quy tắc `Proposal Number` ở §6.1 của spec chính: `{SEQ}/{MMYY}/{FULLNAME_UPPER}`. Mỗi **bản đăng ký tuần** là một số, không phải mỗi ngày WFH. Đơn sau hạn là một `Request` nên **có số đơn riêng**, lấy từ cùng bộ đếm.
+Dùng lại nguyên quy tắc `Proposal Number` ở §6.1 của spec chính: `{SEQ}/{MMYY}/{FULLNAME_UPPER}`. Mỗi **bản đăng ký tuần** là một số, không phải mỗi ngày WFH. Đơn sau hạn và đơn WFH dài hạn đều là `Request` nên **có số đơn riêng**, lấy từ cùng bộ đếm.
 
 ### 3.2 Cấu hình chính sách — màn **Cấu hình chung**
 
@@ -67,7 +80,7 @@ export interface UpdateWfhPolicyPayload {
 
 #### 3.2.1 Ngày lễ — nguồn dùng chung
 
-Bảng ngày lễ do HR CRUD trên Cấu hình chung — **[`general-setting.md`](./general-setting.md) §5**. WFH đọc cho R4; đơn nghỉ phép loại khỏi `total_days`.
+Bảng ngày lễ do HR CRUD trên Cấu hình chung — **[`general-setting.md`](./general-setting.md) §6**. WFH đọc cho R4; đơn nghỉ phép loại khỏi `total_days`.
 
 `GET /wfh/weeks?week_start=` resolve `blocked_reason = 'holiday'` + `holiday_name`. FE không tự fetch holidays để suy ô.
 
@@ -85,7 +98,7 @@ Hàng của họ trên lưới **khoá giống sau hết hạn sửa** (§3.4 / 
 
 - Mọi checkbox disable (`can_check = false`), kể cả tuần N+1 còn mở.
 - `PUT /wfh/registrations` của chính họ → `WFH_EMPLOYEE_BLOCKED`.
-- Không tạo đơn sau hạn (`LATE_WFH_EMPLOYEE_BLOCKED`).
+- Không tạo đơn sau hạn (`LATE_WFH_EMPLOYEE_BLOCKED`) hay đơn dài hạn (`LONG_TERM_WFH_EMPLOYEE_BLOCKED`).
 - Không nhận `wfh.deadline_soon`.
 - Hàng **vẫn hiện** trên lưới (kể cả tab Của tôi). Ô WFH đã có trước đó vẫn hiện (checked + disable); không tự xoá lịch.
 - Icon khoá cạnh tên + tooltip *"Bạn không được đăng ký WFH. Liên hệ HR."* (chính chủ) / *"Nhân viên này bị khoá đăng ký WFH."* (người khác).
@@ -200,6 +213,115 @@ Khi `is_locked = true` **hoặc** hàng thuộc nhân viên bị khoá đăng k�
 
 Không có form chip hay nút "Chỉnh sửa" bọc ngoài — **lưới là form**.
 
+### 3.7 Đơn đăng ký WFH dài hạn
+
+Khi nhân viên cần WFH **liên tục nhiều ngày / nhiều tuần** (không phải 1–2 ngày rời rạc trên lưới tuần), họ tạo đơn `type = 'long_term_wfh'`. Đây **không** phải tick checkbox tuần — là một `Request` có khoảng thời gian, lý do, tài liệu, và **phải được duyệt qua 2 bước**.
+
+Hai bước vì hai câu hỏi khác nhau: **quản lý trực tiếp** trả lời *"công việc của bạn có chạy được khi WFH dài như vậy không"*, **HR** trả lời *"trường hợp này có đúng chính sách công ty không"*. Không ai trả lời thay ai được, nên đơn phải qua cả hai.
+
+```
+  Nhân viên mở form
+       │
+       ├── Người làm đơn   = user đăng nhập (read-only)
+       ├── Từ ngày / Đến ngày
+       ├── Lý do
+       ├── Tài liệu        = upload đính kèm
+       └── Người duyệt     = quản lý trực tiếp → HR (read-only, 2 bước)
+                                      │
+                                      ▼
+                        [pending] · Chờ quản lý duyệt          ◄── bước 1
+                                      │
+        ┌─────────────────────────────┼─────────────────────────────┐
+        │ QL từ chối                  │ QL duyệt                    │ QL yêu cầu sửa
+        ▼                             ▼                             ▼
+   [rejected]              [pending_hr] · Chờ HR duyệt      [changes_requested]
+   (kết thúc)                          │                             │
+                                       │                    sửa & gửi lại
+        ┌──────────────────────────────┼──────────────┐              │
+        │ HR từ chối                   │ HR duyệt     │ HR yêu cầu sửa│
+        ▼                              ▼              └──────────────┤
+   [rejected]                     [approved]                         │
+   (kết thúc)                          │                             ▼
+                          materialize lên lưới tuần        quay lại bước 1
+                          (mọi ngày làm việc trong khoảng,   (QL duyệt lại)
+                           trừ lễ / T7 / CN)
+```
+
+**Đơn chỉ có hiệu lực sau khi HR duyệt.** Ở `pending_hr` lưới tuần **chưa** đổi — quản lý duyệt là gật đầu về công việc, chưa phải quyết định cuối cùng.
+
+| # | Quy tắc | Kiểm ở đâu |
+|---|---|---|
+| **T1** | Proposer **không** ∈ `blocked_employee_ids`. Người bị khoá → `LONG_TERM_WFH_EMPLOYEE_BLOCKED`. Ẩn CTA trên UI. | FE + BE |
+| **T2** | `end_date >= start_date`. Cả hai là ISO date, đơn vị luôn `full_day`. Không có nửa ngày / theo giờ. | FE + BE |
+| **T3** | Khoảng phải phủ **≥ 2 tuần ISO** — `iso_week(end_date)` khác `iso_week(start_date)` (kể cả vắt năm). Xin ngắn hơn → dùng lưới tuần hoặc đơn sau hạn. `LONG_TERM_WFH_RANGE_TOO_SHORT`. | FE + BE |
+| **T4** | `start_date` **không** ở quá khứ. Cảnh báo mềm nếu = hôm nay (bắt đầu giữa tuần). | FE + BE |
+| **T5** | **Lý do bắt buộc**, 5–500 ký tự. | FE + BE |
+| **T6** | **Tài liệu bắt buộc ≥ 1 file.** Tái dùng `ListFileRecords` / dropzone của spec chính. Tối đa 5 file, mỗi file ≤ 10MB. Thiếu file → `LONG_TERM_WFH_FILE_REQUIRED`. | FE + BE |
+| **T7** | Đơn qua **2 bước duyệt tuần tự** — chi tiết §3.8. **Bước 1** `approver_id` = **quản lý cấp trên trực tiếp**, đúng quy tắc spec chính §7.3 (org-chart → fallback CEO → nhảy cấp nếu trùng proposer). **Bước 2** = **nhóm HR**, không gán đích danh. Form hiển thị read-only cả hai bước. Chỉ HR/CEO thấy nút `Đổi người duyệt` (chỉ đổi được bước 1). | BE |
+| **T8** | Một nhân viên **tối đa 1 đơn `pending` / `pending_hr` / `changes_requested`**. Tạo thêm → `LONG_TERM_WFH_PENDING`, FE điều hướng sang đơn đang chờ. | BE |
+| **T9** | Khoảng `[start_date, end_date]` **không trùng** đơn `pending` / `pending_hr` / `approved` khác của cùng người (`long_term_wfh` hoặc `leave_of_absence`). → `REQUEST_OVERLAPPED` kèm số đơn bị trùng. | BE |
+| **T10** | Khi **HR duyệt** (bước 2, `pending_hr` → `approved`): BE materialize lên lưới — với **mỗi tuần ISO** giao với khoảng, upsert `WfhRegistration`: mọi ngày làm việc (T2–T6) ∈ khoảng, **trừ ngày lễ**. **Bỏ qua** `max_days_per_week` và `blocked_weekdays` — đơn dài hạn là ngoại lệ đã được cả quản lý lẫn HR duyệt. Action log ghi `long_term_approved`. Ô lưới: `mark = 'wfh'`, `source = 'long_term'`, `can_check = false` (trừ HR override). **Quản lý duyệt bước 1 không materialize gì cả.** | BE |
+| **T11** | **Từ chối ở bất kỳ bước nào**: đơn → `rejected` (kết thúc), lưới **không đổi**. Nhân viên nhận in-app + reply Google Chat kèm tên người từ chối và bước bị dừng. Xin lại → Nhân bản. | BE |
+| **T12** | **Yêu cầu chỉnh sửa ở bất kỳ bước nào**: đơn → `changes_requested`. Nhân viên sửa ngày / lý do / tài liệu rồi gửi lại; đơn quay về **`pending` (bước 1)** — xem T17. | FE + BE |
+| **T13** | Đơn dài hạn **đẩy Google Chat** như đơn nghỉ phép (một đơn = một thread). Bước 1 @mention quản lý; khi quản lý duyệt, BE reply cùng thread @mention **nhóm HR** cho bước 2 (§7.3). Card: khoảng ngày, số ngày làm việc, lý do, số file đính kèm, **chip trạng thái theo bước**. | BE |
+| **T14** | Huỷ đơn `approved` khi `start_date > today` (proposer / HR / CEO): BE gỡ các ngày `source = 'long_term'` của đơn này khỏi lưới các tuần chưa diễn ra. Tuần đã qua giữ nguyên. | BE |
+| **T15** | Đơn `pending` / `pending_hr` phủ tuần đã khoá: **không** chặn gửi. Khi HR duyệt, materialize cả ngày đã qua trong tuần đang chạy (đường ghi nhận, giống H3). | BE |
+| **T16** | Khi **HR duyệt** mà nhân viên đang có `late_wfh` `pending` / `changes_requested` giao tuần với khoảng: BE **huỷ** đơn sau hạn đó (H7) — lịch dài hạn là nguồn sự thật. Ở `pending_hr` thì **chưa** đụng tới `late_wfh`, vì đơn dài hạn còn có thể bị HR từ chối. | BE |
+| **T17** | Sau `changes_requested`, nhân viên gửi lại → đơn về **`pending`**, BE **xoá dấu vết bước 1** (`manager_decided_at` / `manager_decided_by` / `manager_decision_note` = `null`) và quản lý phải duyệt lại. Kể cả khi chính HR là người yêu cầu sửa: nội dung (khoảng ngày, lý do, tài liệu) đã đổi thì cái gật đầu cũ của quản lý không còn giá trị. | BE |
+| **T18** | **Không ai duyệt hai bước của cùng một đơn.** Nếu người duyệt bước 1 cũng thuộc nhóm HR, bước 2 phải do HR khác hoặc CEO thao tác. Proposer thuộc nhóm HR thì cũng không tự duyệt bước 2 của mình. Không còn ai hợp lệ → fallback **CEO**. Vi phạm → `REQUEST_NOT_APPROVER`. | BE |
+
+**Người theo dõi:** mặc định nhóm HR như spec chính. Người làm đơn thêm/bớt được. HR là người theo dõi **không** đồng nghĩa với quyền duyệt bước 2 — quyền đó đến từ `job_role = 'hr'`, không từ danh sách theo dõi.
+
+**Quản lý tự xin:** `approver_id` bước 1 nhảy lên một cấp (không tự duyệt) — cùng §7.3 spec chính. Bước 2 vẫn là HR như mọi đơn khác.
+
+**HR / CEO:** xem mọi đơn. **CEO** duyệt thay được ở cả hai bước. **HR** là người duyệt chính thức của bước 2; HR duyệt thay quản lý ở bước 1 thì đơn vẫn phải qua bước 2 do **HR khác hoặc CEO** thực hiện (T18) — một người không gánh cả hai vai.
+
+**Tách với đăng ký tuần và đơn sau hạn**
+
+| | Đăng ký tuần | Đơn sau hạn | **Đơn dài hạn** |
+|---|---|---|---|
+| Entity | `WfhRegistration` | `Request` `late_wfh` | `Request` `long_term_wfh` |
+| Cách chọn ngày | Checkbox rời trên lưới | Checkbox ngày còn lại của tuần khoá | `Từ ngày` → `Đến ngày` |
+| Duyệt | Không | HR — **1 bước** | **2 bước: quản lý trực tiếp → HR** |
+| Trạng thái trung gian | — | — | `pending_hr` |
+| Lý do / tài liệu | Không | Lý do bắt buộc, không bắt file | Lý do + **≥ 1 file** |
+| Hạn mức tuần / ngày bắt buộc lên VP | Áp R2, R3 | Áp R2, R3 | **Không** — ngoại lệ đã duyệt |
+| Sống ở đâu | Lưới `/requests/wfh` | `/requests/wfh/late/*` | `/requests/wfh/long-term/*` |
+
+### 3.8 Duyệt 2 bước — chi tiết
+
+Chỉ `long_term_wfh` dùng luồng này. `leave_of_absence` và `late_wfh` giữ nguyên 1 bước.
+
+**Trạng thái `pending` mang nghĩa khác nhau theo loại đơn:** với `leave_of_absence` / `late_wfh` nó là *"chờ duyệt"*; với `long_term_wfh` nó là *"chờ **quản lý** duyệt"* (bước 1). Nhãn hiển thị vì thế phải đọc theo `type`: FE tra key `statusLongTermWfh.{status}` trước, không có thì rơi về `status.{status}` dùng chung (spec chính §7.2, §12).
+
+| Bước | Từ | Hành động | Đến | Ai được làm |
+|---|---|---|---|---|
+| — | `draft` | `submit` | `pending` | Proposer |
+| **1** | `pending` | `approve` | **`pending_hr`** | `approver_id` (quản lý trực tiếp), CEO |
+| **1** | `pending` | `reject` (bắt buộc note) | `rejected` | `approver_id`, CEO |
+| **1** | `pending` | `request_changes` (bắt buộc note) | `changes_requested` | `approver_id`, CEO |
+| **2** | `pending_hr` | `approve` | **`approved`** + materialize (T10) | Bất kỳ ai thuộc nhóm HR, CEO — trừ người đã duyệt bước 1 và trừ proposer (T18) |
+| **2** | `pending_hr` | `reject` (bắt buộc note) | `rejected` | Nhóm HR, CEO |
+| **2** | `pending_hr` | `request_changes` (bắt buộc note) | `changes_requested` | Nhóm HR, CEO |
+| — | `changes_requested` | `submit` | `pending` (**về bước 1**, T17) | Proposer |
+| — | `pending` / `pending_hr` / `changes_requested` | `cancel` | `cancelled` | Proposer |
+| — | `approved` | `cancel` | `cancelled` + gỡ lưới (T14) | Proposer (chỉ khi `start_date > today`), HR, CEO |
+
+**Cùng một endpoint cho cả hai bước.** FE gọi `POST /requests/:id/approve` như mọi đơn khác; BE nhìn `status` hiện tại để biết đang xử lý bước nào và chuyển sang trạng thái kế tiếp. Không có endpoint `approve-hr` riêng — thêm endpoint theo bước sẽ nhân đôi mọi thứ ở FE mà không thêm thông tin gì.
+
+**Ai thấy đơn ở tab "Chờ tôi duyệt"** (`GET /requests?type=long_term_wfh&scope=to_approve`):
+
+| Caller | Thấy đơn có `status` |
+|---|---|
+| Quản lý trực tiếp (là `approver_id` của đơn) | `pending` |
+| Nhân viên nhóm HR | `pending_hr` |
+| CEO | `pending` + `pending_hr` |
+| HR mà cũng là `approver_id` của đơn đó | `pending` (bước 1 của mình) — đơn đó **không** quay lại với họ ở bước 2 (T18) |
+
+`RequestsMeta.pending_count` đếm đúng tập trên theo vai trò của caller, không tách hai con số — với người dùng thì đó chỉ là *"số đơn đang chờ tôi"*.
+
+**Dấu vết hai bước** ghi riêng trên `RequestRes`: bước 1 vào `manager_decided_at` / `manager_decided_by` / `manager_decision_note`, bước cuối (HR duyệt, hoặc ai đó từ chối) vào `decided_at` / `decided_by` / `decision_note` sẵn có. Nhờ vậy màn chi tiết dựng được timeline *"QL duyệt lúc … → HR duyệt lúc …"* mà không cần đọc ngược action log.
+
 ---
 
 ## 4. Mô hình dữ liệu
@@ -260,8 +382,8 @@ export interface WfhUserRef {
 export interface WfhActionLog {
   id: number;
   registration_id: number;
-  action: 'created' | 'updated' | 'withdrawn' | 'locked' | 'late_approved' | 'hr_updated';
-  /** Với 'updated' / 'late_approved' / 'hr_updated': ghi lại thay đổi để đối chiếu. */
+  action: 'created' | 'updated' | 'withdrawn' | 'locked' | 'late_approved' | 'hr_updated' | 'long_term_approved';
+  /** Với 'updated' / 'late_approved' / 'hr_updated' / 'long_term_approved': ghi lại thay đổi để đối chiếu. */
   days_before?: WfhDay[] | null;
   days_after?: WfhDay[] | null;
   note?: string | null;
@@ -310,14 +432,17 @@ export interface WfhRosterRow {
     date: string;
     weekday: number;
     /**
-     * `wfh` — đã đăng ký (hoặc đơn sau hạn đã duyệt).
-     * `wfh_pending` — đang có đơn sau hạn chờ duyệt cho ngày này.
+     * `wfh` — đã đăng ký (tuần / sau hạn đã duyệt / dài hạn đã duyệt).
+     * `wfh_pending` — đang có đơn sau hạn *hoặc* đơn dài hạn chờ duyệt phủ ngày này.
      * `empty` — lên văn phòng / không WFH.
      */
     mark: 'wfh' | 'wfh_pending' | 'empty';
-    /** FE bind checkbox. false nếu hàng khoá hạn / bị block, hoặc không đúng quyền. */
+    /** Nguồn ô WFH — để tooltip và khoá checkbox. */
+    source?: 'weekly' | 'late' | 'long_term' | 'hr_override' | null;
+    /** FE bind checkbox. false nếu hàng khoá hạn / bị block / phủ bởi đơn dài hạn đã duyệt / không đúng quyền. */
     can_check: boolean;
     late_request_id?: number | null;
+    long_term_request_id?: number | null;
   }>;
 }
 
@@ -327,15 +452,38 @@ export interface WfhRosterRes {
 }
 ```
 
-Đơn sau hạn **không** thêm entity mới. Mở rộng `RequestRes` (spec chính) khi `type = 'late_wfh'`:
+Đơn sau hạn và đơn dài hạn **không** thêm entity mới. Mở rộng `RequestRes` (spec chính):
 
 ```ts
-// Bổ sung vào RequestRes — chỉ có giá trị khi type = 'late_wfh'
+// type = 'late_wfh'
 wfh_week_start?: string | null;   // thứ 2 của tuần đang xin
 wfh_dates?: string[] | null;      // ISO date, 1..max_days_per_week
+
+// type = 'long_term_wfh' — dùng start_date / end_date sẵn có trên RequestRes
+// wfh_week_start / wfh_dates = null
 ```
 
-`start_date` / `end_date` trên `RequestRes` = min/max của `wfh_dates`, để list đơn vẫn sort/lọc theo ngày được. `duration_unit` luôn `full_day`. `leave_category` = `null`.
+**`late_wfh`:** `start_date` / `end_date` = min/max của `wfh_dates`. `duration_unit` luôn `full_day`. `leave_category` = `null`.
+
+**`long_term_wfh`:** `start_date` / `end_date` do người dùng chọn (T2). `duration_unit` luôn `full_day`. `leave_category` = `null`. `total_days` = số ngày làm việc trong khoảng (BE tính, loại T7/CN + lễ). File đính kèm qua `file_ids` / `ListFileRecords` — bắt buộc ≥ 1.
+
+Luồng 2 bước (§3.8) cần thêm trạng thái `pending_hr` và 4 trường dấu vết bước 1 trên `RequestRes` — khai báo ở spec chính §5.1, §5.2:
+
+```ts
+// lib/constants/requests.ts — thêm vào REQUEST_STATUSES, giữa 'pending' và 'changes_requested'
+'pending_hr',   // Chờ HR duyệt — CHỈ long_term_wfh đi qua trạng thái này
+
+// lib/types/request.ts — thêm vào RequestRes
+/** Bước 2. null cho tới khi một HR thực sự thao tác — bước 2 không gán đích danh trước (§3.8). */
+hr_approver_id?: number | null;
+hr_approver?: RequestUserRef | null;
+/** Dấu vết bước 1 (quản lý trực tiếp). Bị xoá về null khi đơn quay lại bước 1 (T17). */
+manager_decided_at?: string | null;
+manager_decided_by?: number | null;
+manager_decision_note?: string | null;
+```
+
+`decided_at` / `decided_by` / `decision_note` giữ nguyên nghĩa **quyết định kết thúc đơn**: HR duyệt bước 2, hoặc bất kỳ ai từ chối / yêu cầu chỉnh sửa.
 
 ### 4.1 Payload
 
@@ -368,6 +516,21 @@ export interface CreateLateWfhPayload {
   submit?: boolean;             // true → gửi duyệt luôn
 }
 
+export interface CreateLongTermWfhPayload {
+  start_date: string;           // ISO date — Từ ngày
+  end_date: string;             // ISO date — Đến ngày; phải ≥ start_date và phủ ≥ 2 tuần ISO
+  reason: string;               // bắt buộc, 5–500 ký tự
+  file_ids: number[];           // bắt buộc ≥ 1, ≤ 5
+  watcher_ids?: number[];
+  /**
+   * Người duyệt **bước 1** (quản lý trực tiếp). Chỉ HR/CEO gửi khi đổi người duyệt.
+   * Form thường không gửi — BE resolve quản lý trực tiếp (§3.7 T7).
+   * Bước 2 là nhóm HR, không nhận từ payload (§3.8).
+   */
+  approver_id?: number;
+  submit?: boolean;
+}
+
 export interface QueryParamsWfh extends QueryParams {
   /** Tab trên UI. */
   scope?: 'mine' | 'all';
@@ -383,6 +546,8 @@ export interface QueryParamsWfh extends QueryParams {
 ```
 
 Đơn sau hạn tạo/sửa/duyệt qua API `Request` của spec chính (`POST /requests` với `type: 'late_wfh'` + `CreateLateWfhPayload`). List đơn chờ HR duyệt: `GET /requests?type=late_wfh&scope=to_approve`.
+
+Đơn dài hạn cùng kênh: `POST /requests` với `type: 'long_term_wfh'` + `CreateLongTermWfhPayload`. List chờ tôi duyệt: `GET /requests?type=long_term_wfh&scope=to_approve` — BE tự lọc theo bước tương ứng với vai trò của caller (§3.8). Duyệt cả hai bước qua cùng `POST /requests/:id/approve`. List của tôi / toàn công ty: `scope=mine` / `scope=all`. Lọc riêng từng bước: `status=pending` (chờ quản lý) hoặc `status=pending_hr` (chờ HR).
 
 ---
 
@@ -414,6 +579,9 @@ export interface QueryParamsWfh extends QueryParams {
 | POST | `/wfh/digest/resend` | `{ week_start: string }` | `{ ok: boolean }` — HR gửi lại card tổng hợp tuần (§7.2) |
 | POST | `/requests` | `type: 'late_wfh'` + `CreateLateWfhPayload` | `RequestRes` — đơn sau hạn (§3.5) |
 | GET | `/requests` | `type=late_wfh&scope=to_approve` | Đơn sau hạn chờ HR duyệt |
+| POST | `/requests` | `type: 'long_term_wfh'` + `CreateLongTermWfhPayload` | `RequestRes` — đơn WFH dài hạn (§3.7) |
+| GET | `/requests` | `type=long_term_wfh&scope=mine\|to_approve\|all`, `status?` | Danh sách đơn dài hạn. `scope=to_approve` trả `pending` cho quản lý, `pending_hr` cho HR, cả hai cho CEO (§3.8) |
+| POST | `/requests/:id/approve` | `RequestDecisionPayload` | `RequestRes` — dùng cho **cả hai bước**; BE nhìn `status` để biết bước nào (§3.8) |
 
 ```ts
 export interface WfhMeta extends PaginationMeta {
@@ -423,6 +591,12 @@ export interface WfhMeta extends PaginationMeta {
   total_days?: number;
   /** Số đơn sau hạn đang chờ duyệt — chỉ trả cho HR/CEO. */
   late_pending_count?: number;
+  /** Số đơn WFH dài hạn đang chờ **caller** duyệt — bước 1 nếu caller là quản lý, bước 2 nếu caller là HR, cả hai nếu là CEO (§3.8). */
+  long_term_pending_count?: number;
+  /** Chỉ trả cho HR/CEO: số đơn dài hạn `pending_hr` toàn công ty — dùng cho thẻ số liệu tab Toàn công ty. */
+  long_term_hr_pending_count?: number;
+  /** Chỉ trả cho HR/CEO: số đơn dài hạn `pending` (còn nằm ở quản lý) toàn công ty — để HR biết cái gì đang tới. */
+  long_term_manager_pending_count?: number;
 }
 ```
 
@@ -445,6 +619,10 @@ export interface WfhMeta extends PaginationMeta {
 | `LATE_WFH_WEEK_NOT_LOCKED` | Tạo đơn sau hạn khi tuần còn mở | Toast + đưa về khối đăng ký tuần sau |
 | `LATE_WFH_PENDING` | Đã có đơn sau hạn đang chờ duyệt cho tuần đó | Điều hướng sang đơn đang chờ |
 | `LATE_WFH_QUOTA_EXCEEDED` | Union ngày đã đăng ký + ngày xin > `max_days_per_week` | Highlight chip, nêu số ngày còn xin được |
+| `LONG_TERM_WFH_EMPLOYEE_BLOCKED` | Người bị khoá tạo đơn dài hạn | Ẩn CTA; nếu lọt thì toast |
+| `LONG_TERM_WFH_RANGE_TOO_SHORT` | Khoảng không phủ đủ 2 tuần ISO | Highlight từ/đến ngày, hint *"Đăng ký dài hạn từ 2 tuần trở lên. 1–2 ngày/tuần thì tick trên lưới."* |
+| `LONG_TERM_WFH_FILE_REQUIRED` | Gửi duyệt khi chưa có file | Highlight dropzone |
+| `LONG_TERM_WFH_PENDING` | Đã có đơn dài hạn đang chờ duyệt | Điều hướng sang đơn đang chờ |
 | `WFH_POLICY_FORBIDDEN` | Không phải HR gọi `PUT /wfh/policy` hoặc CRUD holiday | Ẩn form cấu hình; nếu lọt thì toast |
 | `HOLIDAY_DUPLICATE` | Trùng ngày lễ | Highlight dòng ngày |
 
@@ -454,14 +632,17 @@ export interface WfhMeta extends PaginationMeta {
 
 ### 6.1 `/requests/wfh` — Đăng ký WFH
 
-**Thao tác chính là table.** Không có form chip / trang tạo riêng. Chọn ngày WFH bằng **checkbox trên từng ô ngày**.
+**Thao tác chính là table.** Chọn ngày WFH tuần bằng **checkbox trên từng ô ngày**. Đơn dài hạn có nút tạo + form riêng (§6.5).
 
-Hai tab:
+Ba tab:
 
 | Tab | Ai thấy | Nội dung |
 |---|---|---|
-| **Của tôi** | Mọi người (mặc định) | Lưới 1 hàng = user đăng nhập |
-| **Toàn công ty** | HR, CEO | Lưới + đơn sau hạn chờ duyệt (§6.3) |
+| **Của tôi** | Mọi người (mặc định) | Lưới 1 hàng = user đăng nhập + bảng đơn dài hạn của tôi |
+| **Chờ tôi duyệt** | Người là quản lý trực tiếp của ai đó, **hoặc** thuộc nhóm HR, hoặc CEO (kèm badge `long_term_pending_count`) | Bảng đơn `long_term_wfh` `scope=to_approve` — quản lý thấy bước 1, HR thấy bước 2, CEO thấy cả hai (§3.8). Cột `Bước` phân biệt |
+| **Toàn công ty** | HR, CEO | Lưới + đơn sau hạn chờ duyệt + đơn dài hạn (§6.3) |
+
+**Header:** tiêu đề + nút secondary `Đăng ký WFH dài hạn` → `/requests/wfh/long-term/create`. Ẩn nút nếu proposer ∈ `blocked_employee_ids`.
 
 #### Bộ lọc — mặc định lúc vào màn
 
@@ -518,6 +699,23 @@ Toolbar: `Đã chọn n/max` + countdown hạn sửa khi tuần đang xem là N+
 
 Không còn khối chip "Đăng ký WFH tuần sau". Banner tuần khoá (không phải HR): liên hệ HR; link đơn sau hạn nếu dùng §3.5.
 
+Ô `source = 'long_term'`: checked + disable, tooltip *"WFH dài hạn · đơn {proposal_number}"*. Click `Fullname` / tooltip mở `/requests/wfh/long-term/[id]`. HR vẫn override được trên tuần đã khoá — bỏ tick ghi `hr_updated`, **không** huỷ đơn dài hạn.
+
+**Bảng đơn dài hạn của tôi** — dưới lưới, chỉ hiện khi có ≥ 1 đơn `long_term_wfh` của user:
+
+`Số đơn` · `Từ ngày` · `Đến ngày` · `Lý do` (cắt 80 ký tự) · `Người duyệt` · `Trạng thái` · ⋯
+
+Cột **`Người duyệt`** hiện **cả hai bước** dưới dạng stepper ngang, bước đang chờ được tô đậm:
+
+```
+ [✓] Trần Văn Quản lý  →  [•] HR
+      đã duyệt 16/09        đang chờ
+```
+
+Bước 1 hiện tên người cụ thể; bước 2 hiện nhãn `HR` khi chưa ai thao tác, đổi thành tên người khi `hr_approver` đã có. Trạng thái `rejected` / `changes_requested`: bước bị dừng tô đỏ/cam, các bước sau xám.
+
+Empty: không hiện bảng, chỉ còn nút header.
+
 ### 6.2 Lịch sử thay đổi
 
 Mở từ `Fullname` (khi có `registration_id`) hoặc icon lịch sử. Timeline dọc:
@@ -527,8 +725,9 @@ Mở từ `Fullname` (khi có `registration_id`) hoặc icon lịch sử. Timeli
 - `Hệ thống đã khoá tuần` — *21/09/2026 00:00*
 - `Trần Thị Ngọc Hà đã duyệt đơn sau hạn` — thêm T3 22/09 · *22/09/2026 09:40*
 - `Trần Thị Ngọc Hà đã chỉnh (HR)` — bỏ T2 21/09 · *22/09/2026 10:15*
+- `Hệ thống đã áp đơn WFH dài hạn` — T2 05/10 … T6 30/10 · *01/10/2026 11:20*
 
-Phần `days_before` / `days_after` trong action log chính là thứ để render dòng "bỏ … thêm …". Diễn biến duyệt/từ chối của chính đơn sau hạn nằm ở action log của `Request` (màn chi tiết đơn), không trộn vào timeline đăng ký trừ sự kiện `late_approved` và `hr_updated`.
+Phần `days_before` / `days_after` trong action log chính là thứ để render dòng "bỏ … thêm …". Diễn biến duyệt/từ chối của đơn sau hạn / dài hạn nằm ở action log của `Request` (màn chi tiết đơn), không trộn vào timeline đăng ký trừ sự kiện `late_approved`, `long_term_approved` và `hr_updated`.
 
 ### 6.3 Tab "Toàn công ty" — dành cho HR
 
@@ -538,9 +737,23 @@ Phần `days_before` / `days_after` trong action log chính là thứ để rend
 
 `Người làm đơn` · `Ngày xin WFH` · `Lý do` · `Gửi lúc` · ⋯ (`Duyệt` / `Từ chối` / `Yêu cầu chỉnh sửa` — đúng UI quyết định của spec chính)
 
+**Khối đơn WFH dài hạn chờ duyệt** — ngay dưới, chỉ hiện khi có đơn `long_term_wfh` `pending` hoặc `pending_hr` toàn công ty. Chia **2 nhóm**, nhóm cần HR ra tay đứng trên:
+
+*Chờ tôi (HR) duyệt* — `status = pending_hr`, đây là việc của HR:
+
+`Người làm đơn` · `Từ ngày` · `Đến ngày` · `Lý do` · `Tài liệu` · `Quản lý đã duyệt` (tên + thời điểm) · ⋯ (`Duyệt` / `Từ chối` / `Yêu cầu chỉnh sửa`)
+
+*Đang chờ quản lý duyệt* — `status = pending`, **chỉ để theo dõi**:
+
+`Người làm đơn` · `Từ ngày` · `Đến ngày` · `Người duyệt bước 1` · `Gửi lúc` · ⋯
+
+HR **không** cần duyệt thay quản lý ở nhóm này — đơn sẽ tự tới bước 2. Nếu quản lý vắng dài ngày thì HR dùng `Đổi người duyệt`; nếu vẫn cần đẩy nhanh thì HR duyệt thay bước 1, nhưng khi đó bước 2 phải do **HR khác hoặc CEO** thao tác (T18) và UI ẩn nút `Duyệt` của chính người đó ở bước 2.
+
+Duyệt bước 2 xong mới materialize lên lưới (T10).
+
 Bên dưới là **cùng lưới tuần** §6.1, `scope=all`.
 
-- Thẻ số liệu trên đầu, tính theo tuần đang lọc: `Đã đăng ký` (số nhân viên có ≥ 1 ô WFH) · `Tổng lượt WFH` · `Đơn sau hạn chờ duyệt`.
+- Thẻ số liệu trên đầu, tính theo tuần đang lọc: `Đã đăng ký` (số nhân viên có ≥ 1 ô WFH) · `Tổng lượt WFH` · `Đơn sau hạn chờ duyệt` · **`Đơn dài hạn chờ HR duyệt`** (`long_term_hr_pending_count` — việc của HR) · `Đơn dài hạn chờ quản lý` (`long_term_manager_pending_count` — chỉ để biết cái gì sắp tới).
 - Tuần **N+1 chưa khoá**: HR **không** tick hàng người khác *trừ* hàng `employee_blocked`. Hàng của HR (nếu xem mình và không bị block) tick được.
 - Tuần **đã khoá hạn** hoặc hàng bị khoá đăng ký: HR tick qua override (§3.6).
 - Duyệt đơn sau hạn vẫn ở khối trên / màn chi tiết đơn. Chỉnh lưới và duyệt đơn là hai đường; chỉnh lưới sẽ huỷ đơn pending cùng tuần (H7).
@@ -559,7 +772,40 @@ Form 1 trang, tái sử dụng layout form đơn nghỉ (cột phải preview Go
 
 Chi tiết / sửa / duyệt đơn sau hạn ở `/requests/wfh/late/[id]`, tái dùng component chi tiết đơn của spec chính. FE nhận `type = 'late_wfh'` thì render khối chip ngày thay cho khối thời lượng nghỉ.
 
-### 6.5 Màn **Cấu hình chung**
+### 6.5 `/requests/wfh/long-term/create` — Form đơn WFH dài hạn
+
+Form 1 trang, tái sử dụng layout form đơn nghỉ (cột phải preview Google Chat). Tiêu đề card: `Tạo đơn đăng ký WFH dài hạn`. **Ẩn** route (redirect về `/requests/wfh`) nếu proposer ∈ `blocked_employee_ids`.
+
+1. **Thông tin đơn** — `Số đơn` (read-only), `Ngày làm đơn` (mặc định hôm nay), **`Người làm đơn`** (read-only, user đăng nhập — không chọn người khác). Không có `Loại nghỉ`.
+2. **Thời gian** — **`Từ ngày`** + **`Đến ngày`** (date picker). Dòng tóm tắt realtime: *"Tổng: {n} ngày làm việc · {from} – {to}"*. Hint: *"Dùng khi WFH liên tục từ 2 tuần trở lên. 1–2 ngày/tuần thì tick trên lưới."* Ẩn radio cả ngày / nửa ngày / theo giờ — luôn `full_day`.
+3. **Lý do** — textarea bắt buộc, 5–500 ký tự, đếm ký tự.
+4. **Tài liệu đính kèm** — dropzone upload, tái dùng component hiện có (`ListFileRecords` / `media-service`). **Bắt buộc ≥ 1 file**, tối đa 5, mỗi file ≤ 10MB. Danh sách file đã chọn: tên · dung lượng · nút xoá. Chấp nhận PDF, ảnh, DOC/DOCX.
+5. **Người duyệt** — read-only, hiện **cả hai bước** theo đúng thứ tự, để người làm đơn biết trước đơn sẽ đi qua những ai:
+   - **Bước 1 · Quản lý trực tiếp** — avatar + tên + chức danh, dòng phụ *"Quản lý trực tiếp của bạn"*. Nút `Đổi người duyệt` chỉ hiện với HR/CEO và **chỉ đổi được bước này**.
+   - **Bước 2 · HR** — avatar nhóm + nhãn *"Nhóm HR"*, dòng phụ *"Duyệt sau khi quản lý đồng ý"*. Không có nút đổi — bước 2 không gán đích danh (§3.8).
+
+   Dưới hai bước là dòng giải thích: *"Đơn có hiệu lực sau khi cả hai bước duyệt."*
+
+   `Người theo dõi`: multi-select, prefill nhóm HR.
+6. **Footer:** `Huỷ` · `Lưu nháp` · `Gửi duyệt`.
+
+Chi tiết / sửa / duyệt ở `/requests/wfh/long-term/[id]`, tái dùng layout chi tiết đơn của spec chính. FE nhận `type = 'long_term_wfh'` thì render khối `Từ ngày – Đến ngày` + `total_days` + danh sách file, không render chip ngày rời hay thời lượng nghỉ.
+
+**Khối tiến độ duyệt** trên màn chi tiết — ngay dưới badge trạng thái, dùng cùng component stepper với bảng ở §6.1:
+
+```
+ ●───────────●───────────○
+ Gửi duyệt   Quản lý     HR
+ 15/09 09:12 16/09 10:04 đang chờ
+```
+
+Nguồn dữ liệu: `submitted_at` · `manager_decided_by` + `manager_decided_at` · `hr_approver` + `decided_at`. Khi đơn `rejected` / `changes_requested`, bước dừng hiện icon tương ứng + `decision_note` ngay dưới.
+
+**Action bar** chỉ hiện `Duyệt` / `Từ chối` / `Yêu cầu chỉnh sửa` khi caller được phép thao tác **đúng bước hiện tại** theo bảng §3.8 — FE dựa vào `status` + vai trò, BE kiểm lại và trả `REQUEST_NOT_APPROVER` nếu lọt. Nút `Duyệt` ở `pending` ghi nhãn `Duyệt (chuyển HR)` để người quản lý không tưởng mình đang chốt đơn.
+
+Tab **Chờ tôi duyệt** (§6.1): cùng cột với bảng đơn dài hạn của tôi, thêm `Người làm đơn` và cột `Bước` (`Chờ quản lý` / `Chờ HR`). Action bar duyệt dính đáy trên mobile — đúng spec chính §11.3.
+
+### 6.6 Màn **Cấu hình chung**
 
 Không làm form cấu hình trong `/requests/wfh`. HR sửa tại `/settings/general` — **[`general-setting.md`](./general-setting.md)**.
 
@@ -575,7 +821,22 @@ Không làm form cấu hình trong `/requests/wfh`. HR sửa tại `/settings/ge
 | `wfh.locked` | Nhân viên **chưa** đăng ký | Sáng thứ 2: `Tuần {tuần} đã khoá. Quên đăng ký hoặc muốn đổi: liên hệ HR.` |
 | `wfh.hr_updated` | Nhân viên bị HR sửa lịch | `HR đã cập nhật WFH tuần {tuần} của bạn: {diff}` |
 
-Đơn sau hạn dùng **đúng** kênh Google Chat + in-app của spec chính (§8): từng đơn một thread.
+Đơn sau hạn và đơn dài hạn dùng **đúng** kênh Google Chat + in-app của spec chính (§8): từng đơn một thread.
+
+### 7.3 Google Chat — đơn dài hạn 2 bước
+
+Một đơn vẫn là **một thread**, nhưng có **hai lần @mention** vì có hai người/nhóm phải ra tay:
+
+| Thời điểm | Gửi gì | Mention ai |
+|---|---|---|
+| Proposer `submit` (`→ pending`) | Message gốc + card, mở thread mới | **Quản lý trực tiếp** (`approver_id`), cc người theo dõi |
+| Quản lý duyệt (`→ pending_hr`) | **Reply vào thread** — `✅ {QL} đã duyệt (bước 1/2) · chuyển HR duyệt` — kèm dòng mention mới | **Nhóm HR** (mọi `job_role = 'hr'`), trừ người vừa duyệt và trừ proposer (T18) |
+| HR duyệt (`→ approved`) | Reply — `✅ {HR} đã duyệt (bước 2/2) · đơn có hiệu lực, lịch WFH đã cập nhật` | Proposer |
+| Từ chối / yêu cầu sửa ở bất kỳ bước nào | Reply theo mẫu spec chính §8.3, **ghi rõ bước bị dừng** | Proposer |
+
+Mỗi reply đồng thời `patch` chip trạng thái trên card gốc: `Chờ quản lý duyệt` → `Chờ HR duyệt` → `Đã duyệt`. Người mở space sau vẫn đọc được đơn đang nằm ở đâu mà không phải cuộn hết thread.
+
+**Không tạo thread thứ hai cho bước 2.** Tách thread sẽ làm mất ngữ cảnh: HR cần đọc đúng lý do và tài liệu mà quản lý đã cân nhắc, và cần thấy quản lý nói gì khi duyệt.
 
 ### 7.2 Google Chat — bản tổng hợp tuần (workspace)
 
@@ -613,7 +874,7 @@ Ngày lễ: dòng `— Nghỉ lễ: {name}` thay vì danh sách người. Không
 ```jsonc
 "wfh": {
   "title": "Đăng ký WFH",
-  "tabs": { "mine": "Của tôi", "all": "Toàn công ty" },
+  "tabs": { "mine": "Của tôi", "toApprove": "Chờ tôi duyệt", "all": "Toàn công ty" },
   "nextWeekCard": {
     "title": "Lịch WFH",
     "week": "Tuần {isoWeek} · {from} – {to}",
@@ -658,6 +919,38 @@ Ngày lễ: dòng `— Nghỉ lễ: {name}` thay vì danh sách người. Không
     "selected": "Đã có {registered} · xin thêm {selected}/{remaining}",
     "alreadyRegistered": "Đã đăng ký"
   },
+  "longTermRequest": {
+    "title": "Tạo đơn đăng ký WFH dài hạn",
+    "cta": "Đăng ký WFH dài hạn",
+    "viewPending": "Xem đơn đang chờ duyệt",
+    "approverHint": "Quản lý trực tiếp của bạn",
+    "rangeHint": "Dùng khi WFH liên tục từ 2 tuần trở lên. 1–2 ngày/tuần thì tick trên lưới.",
+    "totalWorkingDays": "Tổng: {count} ngày làm việc · {from} – {to}",
+    "attachments": "Tài liệu đính kèm",
+    "attachmentsHint": "Bắt buộc ít nhất 1 file (PDF, ảnh, DOC/DOCX). Tối đa 5 file, mỗi file ≤ 10MB.",
+    "upload": "Tải tài liệu lên",
+    "myTableTitle": "Đơn WFH dài hạn của tôi",
+    "pendingTableTitle": "Đơn WFH dài hạn chờ duyệt",
+    "hrPendingTableTitle": "Chờ tôi (HR) duyệt",
+    "managerPendingTableTitle": "Đang chờ quản lý duyệt",
+    "approvalFlowHint": "Đơn có hiệu lực sau khi cả hai bước duyệt.",
+    "step": "Bước",
+    "stepManager": "Chờ quản lý",
+    "stepHr": "Chờ HR",
+    "step1Label": "Bước 1 · Quản lý trực tiếp",
+    "step2Label": "Bước 2 · HR",
+    "step2Hint": "Duyệt sau khi quản lý đồng ý",
+    "hrGroup": "Nhóm HR",
+    "managerApprovedAt": "Quản lý đã duyệt {time}",
+    "approveAndForward": "Duyệt (chuyển HR)",
+    "waitingStep": "đang chờ",
+    "progressSubmitted": "Gửi duyệt",
+    "progressManager": "Quản lý",
+    "progressHr": "HR",
+    "gridTooltip": "WFH dài hạn · đơn {proposalNumber}",
+    "fromDate": "Từ ngày",
+    "toDate": "Đến ngày"
+  },
   "blockedReason": {
     "holiday": "Nghỉ lễ: {name}",
     "mandatory_office": "Ngày bắt buộc có mặt tại văn phòng",
@@ -683,6 +976,11 @@ Ngày lễ: dòng `— Nghỉ lễ: {name}` thay vì danh sách người. Không
     "days": "Ngày WFH",
     "note": "Ghi chú",
     "reason": "Lý do",
+    "fromDate": "Từ ngày",
+    "toDate": "Đến ngày",
+    "attachments": "Tài liệu",
+    "proposer": "Người làm đơn",
+    "approver": "Người duyệt"
   },
   "actions": {
     "save": "Lưu",
@@ -692,7 +990,9 @@ Ngày lễ: dòng `— Nghỉ lễ: {name}` thay vì danh sách người. Không
   "stats": {
     "registered": "Đã đăng ký",
     "totalDays": "Tổng lượt WFH",
-    "latePending": "Đơn sau hạn chờ duyệt"
+    "latePending": "Đơn sau hạn chờ duyệt",
+    "longTermHrPending": "Đơn dài hạn chờ HR duyệt",
+    "longTermManagerPending": "Đơn dài hạn chờ quản lý"
   },
   "log": {
     "created": "{actor} đã đăng ký",
@@ -700,7 +1000,10 @@ Ngày lễ: dòng `— Nghỉ lễ: {name}` thay vì danh sách người. Không
     "withdrawn": "{actor} đã huỷ đăng ký",
     "locked": "Hệ thống đã khoá tuần",
     "late_approved": "{actor} đã duyệt đơn sau hạn",
+    "long_term_manager_approved": "{actor} đã duyệt đơn WFH dài hạn (bước 1/2)",
+    "long_term_hr_approved": "{actor} đã duyệt đơn WFH dài hạn (bước 2/2)",
     "hr_updated": "{actor} đã chỉnh (HR)",
+    "long_term_approved": "Hệ thống đã áp đơn WFH dài hạn",
     "diff": "bỏ {removed}, thêm {added}"
   },
   "errors": {
@@ -711,7 +1014,12 @@ Ngày lễ: dòng `— Nghỉ lễ: {name}` thay vì danh sách người. Không
     "holidayDuplicate": "Ngày lễ này đã tồn tại.",
     "lateWeekNotLocked": "Tuần này còn mở, hãy đăng ký trực tiếp trên form tuần sau.",
     "latePending": "Bạn đã có đơn WFH sau hạn đang chờ duyệt cho tuần này.",
-    "quotaExceeded": "Chỉ xin thêm được {remaining} ngày (tối đa {max}/tuần)."
+    "quotaExceeded": "Chỉ xin thêm được {remaining} ngày (tối đa {max}/tuần).",
+    "longTermEmployeeBlocked": "Bạn không được đăng ký WFH. Liên hệ HR.",
+    "longTermRangeTooShort": "Đăng ký dài hạn từ 2 tuần trở lên. 1–2 ngày/tuần thì tick trên lưới.",
+    "longTermFileRequired": "Vui lòng tải lên ít nhất 1 tài liệu.",
+    "longTermPending": "Bạn đã có đơn WFH dài hạn đang chờ duyệt.",
+    "longTermSameApproverBothSteps": "Bạn đã duyệt bước 1 của đơn này. Bước 2 cần một người HR khác hoặc CEO duyệt."
   }
 }
 ```
@@ -722,11 +1030,14 @@ Ngày lễ: dòng `— Nghỉ lễ: {name}` thay vì danh sách người. Không
 
 ```
 app/[locale]/(protected)/requests/wfh/
-├── page.tsx                      # 2 tab: Của tôi | Toàn công ty
+├── page.tsx                      # 3 tab: Của tôi | Chờ tôi duyệt | Toàn công ty
 ├── [id]/page.tsx                 # Chi tiết đăng ký tuần + lịch sử thay đổi
-└── late/
-    ├── create/page.tsx           # Form đơn xin WFH sau hạn (§6.4)
-    └── [id]/page.tsx             # Chi tiết / duyệt đơn sau hạn
+├── late/
+│   ├── create/page.tsx           # Form đơn xin WFH sau hạn (§6.4)
+│   └── [id]/page.tsx             # Chi tiết / duyệt đơn sau hạn
+└── long-term/
+    ├── create/page.tsx           # Form đơn WFH dài hạn (§6.5)
+    └── [id]/page.tsx             # Chi tiết / duyệt đơn dài hạn
 
 components/pages/requests/wfh/
 ├── wfh-week-matrix.tsx           # Lưới tuần — thao tác chính (§6.1)
@@ -737,6 +1048,9 @@ components/pages/requests/wfh/
 ├── wfh-roster-filters.tsx        # Mặc định: tuần hiện tại + user đăng nhập
 ├── wfh-late-pending-table.tsx
 ├── wfh-late-form.tsx
+├── wfh-long-term-form.tsx
+├── wfh-long-term-table.tsx       # Của tôi / Chờ duyệt / khối HR
+├── wfh-long-term-approval-steps.tsx  # Stepper 2 bước — dùng chung bảng + màn chi tiết (§6.1, §6.5)
 └── wfh-stats.tsx
 
 # Khối Cấu hình chung — xem general-setting.md
@@ -747,6 +1061,7 @@ lib/services/wfh-service.ts
 lib/constants/wfh.ts              # nhãn thứ — KHÔNG chứa "thứ 5 bị khoá"
 lib/validations/wfh.schema.ts     # zod đăng ký tuần, đọc giới hạn từ WfhPolicy
 lib/validations/late-wfh.schema.ts
+lib/validations/long-term-wfh.schema.ts
 lib/helpers/wfh-week.ts           # getIsoWeek, formatWeekRange, diffDays cho log
 hooks/queries/wfh/
 ├── use-wfh-policy.ts
@@ -758,7 +1073,7 @@ hooks/queries/settings/
 └── use-holiday-mutations.ts
 ```
 
-Đơn sau hạn: tái dùng `hooks/queries/requests/*` với `type: 'late_wfh'`. Không nhân bản state machine.
+Đơn sau hạn / dài hạn: tái dùng `hooks/queries/requests/*` với `type: 'late_wfh'` hoặc `type: 'long_term_wfh'`. Không nhân bản state machine.
 
 **React Query keys:**
 
@@ -770,7 +1085,7 @@ hooks/queries/settings/
 ['settings', 'holidays', params]
 ```
 
-Sau mỗi mutation đăng ký tuần: invalidate `['wfh']`. Sau duyệt đơn sau hạn: invalidate cả `['wfh']` và `['requests']`.
+Sau mỗi mutation đăng ký tuần: invalidate `['wfh']`. Sau duyệt đơn sau hạn / dài hạn: invalidate cả `['wfh']` và `['requests']`.
 
 ---
 
@@ -800,6 +1115,28 @@ Sau mỗi mutation đăng ký tuần: invalidate `['wfh']`. Sau duyệt đơn sa
 | Duyệt đơn sau hạn làm vượt `max_days_per_week` (ví dụ nhân viên vừa được sửa bản đăng ký… không xảy ra sau khoá; hoặc hai đơn — bị L6 chặn) | `LATE_WFH_QUOTA_EXCEEDED`. HR thấy lỗi trên dialog duyệt, không silent truncate. |
 | HR tự gửi đơn sau hạn | Người duyệt = CEO. |
 | Tuần đã kết thúc (qua 23:59 thứ 6) | Ẩn CTA tạo đơn sau hạn. Đơn `pending` còn lại: HR vẫn duyệt được nhưng BE từ chối nếu mọi `wfh_dates` đều đã qua; nếu còn ngày chưa qua thì chỉ giữ những ngày đó. |
+| Nhân viên ∈ `blocked_employee_ids` mở form dài hạn | Redirect `/requests/wfh`; CTA ẩn. Gọi API → `LONG_TERM_WFH_EMPLOYEE_BLOCKED`. |
+| Khoảng dài hạn chỉ 1 tuần ISO | `LONG_TERM_WFH_RANGE_TOO_SHORT`; hint dùng lưới tuần. |
+| Gửi duyệt dài hạn chưa upload file | Chặn FE; nếu lọt → `LONG_TERM_WFH_FILE_REQUIRED`. |
+| Đã có đơn dài hạn pending, tạo thêm | `LONG_TERM_WFH_PENDING` → điều hướng đơn đang chờ. |
+| Khoảng dài hạn trùng đơn nghỉ phép pending/approved | `REQUEST_OVERLAPPED` kèm số đơn nghỉ. |
+| Quản lý duyệt đơn dài hạn (bước 1) | Đơn chuyển `pending_hr`. Lưới **chưa đổi**. BE reply thread Chat @mention nhóm HR (§7.3). |
+| HR duyệt đơn dài hạn (bước 2) | Materialize mọi ngày làm việc trong khoảng lên lưới, bỏ qua max/ngày bắt buộc; ô `source = long_term`, checkbox disable. |
+| HR từ chối đơn đã qua bước 1 | Đơn → `rejected`, lưới không đổi, `late_wfh` pending cùng tuần **không** bị huỷ (T16). Reply thread ghi rõ dừng ở bước 2. |
+| HR yêu cầu chỉnh sửa ở bước 2 | Đơn → `changes_requested`. Gửi lại thì về `pending` và **quản lý duyệt lại từ đầu** (T17) — nội dung đã đổi nên cái gật đầu cũ hết giá trị. |
+| Quản lý trực tiếp của proposer cũng thuộc nhóm HR | Người đó duyệt bước 1; bước 2 do HR khác hoặc CEO (T18). Nhóm HR chỉ còn đúng người đó → fallback CEO. |
+| Proposer thuộc nhóm HR | Bước 1 theo org-chart như thường. Bước 2 do HR khác; không còn ai → CEO. Không tự duyệt đơn của mình. |
+| Đơn kẹt ở `pending_hr` vì HR nghỉ dài | CEO duyệt thay bước 2. Không có cơ chế tự động duyệt sau N ngày ở v1. |
+| Đơn ở `pending_hr` mà proposer huỷ | `cancelled`; lưới không đổi vì chưa materialize. Reply thread + in-app cho quản lý đã duyệt và nhóm HR. |
+| Hai HR cùng bấm Duyệt ở bước 2 | Người sau nhận `REQUEST_INVALID_TRANSITION` → toast + refetch. `hr_approver_id` ghi người thắng. |
+| Người vừa duyệt bước 1 bấm Duyệt ở bước 2 | `REQUEST_NOT_APPROVER` (T18); FE ẩn sẵn action bar cho người đó. |
+| HR bỏ tick một ngày `source = long_term` trên lưới đã khoá | Cho phép (H3); log `hr_updated`. Đơn dài hạn **không** bị huỷ. |
+| Huỷ đơn dài hạn `approved` khi `start_date > today` | Gỡ ngày `source = long_term` của đơn đó khỏi tuần chưa diễn ra. |
+| Huỷ khi khoảng đã bắt đầu | Chỉ HR/CEO. Gỡ ngày **tương lai**; ngày đã qua giữ trên lưới. |
+| Đơn dài hạn pending phủ tuần nhân viên đang tick | Cho tick tuần bình thường. Khi duyệt: union/ghi đè ngày làm việc trong khoảng (T10), log `long_term_approved`. |
+| Đơn `late_wfh` pending trùng tuần được đơn dài hạn duyệt | H7 — huỷ `late_wfh`, reply thread Chat. |
+| Quản lý (không phải HR) mở tab Toàn công ty | Không thấy tab đó. Thấy **Chờ tôi duyệt** với đơn cấp dưới **đang ở bước 1**; đơn họ đã duyệt biến khỏi tab này và theo dõi tiếp ở `scope=mine` của proposer hoặc màn chi tiết. |
+| Org-chart thiếu quản lý trực tiếp | `REQUEST_NO_APPROVER` — chặn gửi, hướng dẫn liên hệ HR (spec chính §7.3). |
 
 ---
 
@@ -813,3 +1150,6 @@ Sau mỗi mutation đăng ký tuần: invalidate `['wfh']`. Sau duyệt đơn sa
 6. **Không đăng ký** — cố tình không đăng ký = **lên công ty cả tuần**, không tạo bản ghi rỗng. Quên hoặc muốn đổi sau khoá → **HR sửa trên lưới** (§3.6).
 7. **Bớt ngày sau khoá** — nhân viên không bớt được. HR bớt/thêm trên lưới.
 8. **Khoá từng người** — CRUD trên Cấu hình chung ([`general-setting.md`](./general-setting.md) §5). Hàng lưới khoá như hết hạn; HR vẫn tick. §3.2.3.
+9. **Đơn WFH dài hạn** — `type = 'long_term_wfh'` trên `RequestRes`. Form: người làm đơn, từ ngày, đến ngày, lý do, tài liệu (upload, ≥ 1 file). Khoảng ≥ 2 tuần ISO. Khi HR duyệt: materialize lên lưới, bỏ qua max ngày/tuần và ngày bắt buộc lên VP. §3.7, §6.5.
+10. **Duyệt 2 bước cho đơn dài hạn** — **quản lý trực tiếp → HR**, tuần tự, thêm trạng thái `pending_hr`. Quản lý xác nhận công việc, HR chốt chính sách; đơn chỉ có hiệu lực sau bước 2. Bước 2 là **cả nhóm HR**, ai thao tác trước thì người đó duyệt; một người không gánh cả hai bước. §3.8.
+11. **Không duyệt song song** — HR chỉ thấy đơn sau khi quản lý đã duyệt. Cho duyệt song song thì HR phải đọc đơn mà quản lý có thể sẽ từ chối, và không có chỗ ghi nhận việc quản lý đã cân nhắc trước khi HR xét chính sách.
